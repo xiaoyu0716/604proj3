@@ -1,3 +1,8 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
 # Project 3 Pre-analysis Plan 
 ## Seyong Hwang, Elvin Tseng, Xiaoyu Qiu, Hanbin Lee
 
@@ -20,6 +25,7 @@ Estimate the effects of:
 - Randomization: Within each block (Length), assign stems uniformly at random to the 4 cells (equal allocation). Record a seeded assignment table for reproducibility.
 - Water changes: every 3 days for all vases; observations taken at change times and on Day 0.
 ![day0_all](day0_all.jpg)
+
 ## 3. Outcomes  measurement schedule
 
 -  Outcome measurement:
