@@ -1,0 +1,138 @@
+---
+title: ''
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+pkgs <- c("tidyverse","lubridate","broom","broom.mixed","lme4",
+          "clubSandwich","emmeans","splines","geepack")
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+bb_ok <- requireNamespace("glmmTMB", quietly = TRUE)  # optional (beta-binomial / NB)
+
+# ===== 1) Load & map your columns (no stem length) =====
+raw <- readr::read_csv("~/Desktop/604proj3/vase_daily.csv", show_col_types = FALSE)
+
+canon <- raw %>%
+  dplyr::rename(
+    date    = Date,
+    vase_id = Vase,
+    A       = Preservative,   # "Yes"/"No"
+    B       = Water,          # "Filtered"/"Tap"
+    n_total = N_total,
+    n_dying = N_dying,
+    n_dead  = N_dead
+  )
+
+# ===== 2) Derive time & outcomes =====
+canon$date <- suppressWarnings(lubridate::ymd(canon$date))
+d0 <- suppressWarnings(min(canon$date, na.rm = TRUE))
+canon$day <- as.numeric(canon$date - d0)   # numeric day index from first date
+
+dat <- canon %>%
+  mutate(
+    n_dying    = tidyr::replace_na(n_dying, 0L),
+    n_dead     = tidyr::replace_na(n_dead,  0L),
+    n_total    = as.integer(n_total),
+    dead_dying = as.integer(n_dead + n_dying),
+    live       = pmax(n_total - dead_dying, 0L),
+    prop_dead  = if_else(n_total > 0, dead_dying / n_total, NA_real_),
+    A = forcats::fct_relevel(factor(A), "No","Yes"),
+    B = forcats::fct_relevel(factor(B), "Tap","Filtered"),
+    vase_id = factor(vase_id)
+  ) %>%
+  filter(!is.na(n_total), n_total > 0)
+
+# Linear time (centered for numerical stability)
+dat <- dat %>%
+  mutate(day_c = as.numeric(scale(day, center = TRUE, scale = FALSE)))
+```
+
+### Overview 
+We estimate the effects of two factors on cut-flower longevity:
+
+- **A:** Preservative (`Yes` vs `No`)
+- **B:** Water type (`Filtered` vs `Tap`)
+
+Observations are collected per vase per observation day: total blossoms, and counts that are **dead** or **dying**. 
+
+### Model 1 — Binomial GLM with Time
+
+**Design & outcome.** At the vase–day level, let $D_{vt}$ be the count dead or dying and $n_{vt}$ be the total blossoms.
+
+Each vase is assigned a unique A×B combination and repeatedly measured over days. Because there is no replication of vases within a treatment cell, a vase random intercept would alias with the treatment effect and cannot be estimated separately.
+
+**Design & outcome.** For vase $v$ observed on day $t$, let $D_{vt}$ be the number of dead or dying blossoms out of $n_{vt}$ total. Because each vase is tied to a unique $A\times B$ treatment cell (no replication of vases within a cell), a vase-level random intercept would be aliased with the treatment effect and is not identifiable. We therefore fit a binomial GLM with a logit link and a linear time adjustment:
+$$
+D_{vt}\mid n_{vt}\sim\mathrm{Binomial}(n_{vt},p_{vt}),\qquad
+\mathrm{logit}(p_{vt})
+=\beta_0+\beta_A A_v+\beta_B B_v+\beta_{AB}(A_vB_v)+\beta_t\,\text{day}_c,
+$$
+where $A\in\{\text{No},\text{Yes}\}$ (preservative), $B\in\{\text{Tap},\text{Filtered}\}$ (water), and $\text{day}_c$ is day centered at its mean.  
+Primary questions: main effects of $A$ and $B$, their interaction $A\times B$, and the time trend $\beta_t$.
+
+
+```{r}
+# ===== 3) Models (linear time) =====
+# Binomial GLM (no random effect)
+m_glm <- glm(
+  cbind(dead_dying, live) ~ A*B + day_c,
+  family = binomial(link = "logit"),
+  data   = dat
+)
+
+summary(m_glm)  
+```
+- **Intercept = 0.522 (p = 0.0038).** Baseline is **A = No**, **B = Tap**, at the mean day.  
+  Odds = \(e^{0.522}=1.69\) gives baseline **probability = 0.628**.
+
+- **Preservative (A: Yes vs No) = -2.456 (p < 0.001).**  
+  Odds ratio \(=\exp(-2.456)=\mathbf{0.086}\) gives about a **90% reduction** in odds of dead/dying with preservative, holding water and day fixed.
+
+- **Water (B: Filtered vs Tap) = +0.121 (p = 0.615).**  
+  Odds ratio \(=\exp(0.121)=\mathbf{1.13}\) gives no detectable water effect.
+
+- **Interaction (A×B) = +0.083 (p = 0.836).**  
+  Odds ratio \(=\exp(0.083)=\mathbf{1.09}\) suggests no evidence that the preservative effect depends on water type.
+
+- **Time (per +1 in centered day) = +0.442 (p < 0.001).**  
+  Odds multiply by \(e^{0.442}=\mathbf{1.56}\) **per day**.
+  
+The binomial model indicates that the coefficient for \(A=\)Yes is \(-2.456\) (p < 0.001), which corresponds to an odds ratio of 0.086, about a 90% reduction in the odds of a blossom being dead/dying at a given day and water type. Water type shows no detectable effect (B: Filtered vs Tap OR = 1.13, p = 0.62), and the interaction \(A\times B\) is negligible (OR = 1.09, p = 0.84), implying the preservative’s benefit is similar in tap and filtered water. The time trend is positive (OR/day = **1.56**, p < 0.001), indicating increasing mortality over days. 
+
+### Poisson 
+
+- The model is:  
+  $$D_{vt}\ \sim\ \mathrm{Poisson}(\mu_{vt}), \quad \log \mu_{vt} \;=\; \log n_{vt} \;+\; \eta_{vt}, \quad
+  \eta_{vt} \;=\; \gamma_0 \;+\; \gamma_A A_v \;+\; \gamma_B B_v \;+\; \gamma_{AB} A_v B_v \;+\; \gamma_t\,\mathrm{day}_c.$$
+
+- Exponent:  
+  $\mu_{vt} \;=\; n_{vt}\times \exp(\eta_{vt}).$
+
+- $\exp(\eta_{vt})$ is the rate per blossom; multiplying by $n_{vt}$ gives the expected count for that vase–day.
+
+
+```{r}
+m_pois_glm <- glm(
+dead_dying ~ A*B + day_c + offset(log(n_total)),
+family = poisson(link = "log"),
+data = dat
+)
+
+summary(m_pois_glm)
+```
+
+Modeling counts with exposure via \(\log(n_{vt})\) yields concordant conclusions on the rate scale. The preservative coefficient \(-1.465\) (p < 0.001) gives a rate ratio RR = 0.23, i.e., the daily rate of dead/dying per blossom is about 77% lower with preservative. Water type again shows no effect (RR = 1.04, p = 0.77) and the interaction is again negligible (RR = 1.13, p = 0.70). Time increases the rate by ~23% per day (RR/day = 1.23, p < 0.001).  Because the offset scales by the number of blossoms observed, treatment comparisons are per-blossom rates.
+
+
+
+
+
+
+
+
+
